@@ -1,0 +1,378 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<title>五子棋</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  background: #1a0e06;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  font-family: 'Microsoft YaHei', '微軟正黑體', sans-serif;
+  color: #e8d5b0;
+  gap: 14px;
+  padding: 20px;
+}
+h1 {
+  font-size: 2rem;
+  letter-spacing: 10px;
+  text-shadow: 0 2px 14px rgba(180,120,20,0.8);
+}
+#controls { display: flex; gap: 10px; align-items: center; }
+.sep { width: 1px; height: 26px; background: #6a4010; margin: 0 2px; }
+button {
+  padding: 8px 22px;
+  background: #3c1a00;
+  color: #e8d5b0;
+  border: 2px solid #6a4010;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 0.95rem;
+  font-family: inherit;
+  transition: all 0.12s;
+  letter-spacing: 1px;
+}
+button:hover { background: #5c2a00; border-color: #aa7030; }
+button.on { background: #a06800; border-color: #f0c040; color: #fff5dc; font-weight: bold; }
+#status {
+  font-size: 1.1rem;
+  font-weight: bold;
+  letter-spacing: 2px;
+  min-height: 1.6em;
+  text-align: center;
+}
+canvas {
+  cursor: crosshair;
+  display: block;
+  box-shadow: 0 8px 40px rgba(0,0,0,0.85), 0 0 0 4px #5a2e00;
+}
+</style>
+</head>
+<body>
+<h1>五 子 棋</h1>
+<div id="controls">
+  <button id="bPvP" class="on" onclick="setMode('pvp')">人人對戰</button>
+  <button id="bPvAI" onclick="setMode('pvai')">人機對戰</button>
+  <div class="sep"></div>
+  <button id="bBlkFirst" class="on" onclick="setFirst(1)">⚫ 黑先</button>
+  <button id="bWhtFirst" onclick="setFirst(2)">⚪ 白先</button>
+  <div class="sep"></div>
+  <button onclick="newGame()">新　局</button>
+</div>
+<div id="status"></div>
+<canvas id="cv"></canvas>
+
+<script>
+// ── Constants ───────────────────────────────────────────────────────────────
+const BS = 15;               // board size (15x15)
+const E = 0, B = 1, W = 2;  // empty, black, white
+const DIRS = [[0,1],[1,0],[1,1],[1,-1]];
+
+// ── Images ──────────────────────────────────────────────────────────────────
+const cv = document.getElementById('cv');
+const cx = cv.getContext('2d');
+const imgs = { brd: new Image(), blk: new Image(), wht: new Image() };
+let loaded = 0;
+imgs.brd.onload = imgs.blk.onload = imgs.wht.onload = () => { if (++loaded === 3) setup(); };
+imgs.brd.src = 'checkerboard.jpg';
+imgs.blk.src = 'black.png';
+imgs.wht.src = 'white.png';
+
+// ── Layout ──────────────────────────────────────────────────────────────────
+let SZ, CELL, PAD;   // canvas size, cell size, border padding
+
+function setup() {
+  const w = imgs.brd.naturalWidth  || 500;
+  const h = imgs.brd.naturalHeight || 500;
+  SZ = Math.min(w, h, 570);
+  cv.width = cv.height = SZ;
+  // half-cell border on each side: CELL = SZ/BS, PAD = CELL/2
+  CELL = SZ / BS;
+  PAD  = CELL / 2;
+  newGame();
+}
+
+// ── Game state ──────────────────────────────────────────────────────────────
+let bd, mode = 'pvp', turn = B, over = false, winLine = [];
+let hr = -1, hc = -1, thinking = false;
+let firstPlayer = B;        // who goes first (B or W)
+let aiC = W, huC = B;       // AI color / human color (pvai mode only)
+
+function newGame() {
+  bd = Array.from({ length: BS }, () => new Array(BS).fill(E));
+  // Derive AI/human colors for pvai mode
+  huC = firstPlayer;
+  aiC = firstPlayer === B ? W : B;
+  turn = firstPlayer; over = false; winLine = []; hr = -1; hc = -1; thinking = false;
+  setStatus((turn === B ? '⚫ 黑棋' : '⚪ 白棋') + '先行');
+  draw();
+}
+
+function setMode(m) {
+  mode = m;
+  document.getElementById('bPvP').classList.toggle('on', m === 'pvp');
+  document.getElementById('bPvAI').classList.toggle('on', m === 'pvai');
+  newGame();
+}
+
+function setFirst(p) {
+  firstPlayer = p;
+  document.getElementById('bBlkFirst').classList.toggle('on', p === B);
+  document.getElementById('bWhtFirst').classList.toggle('on', p === W);
+  newGame();
+}
+
+function setStatus(s) { document.getElementById('status').textContent = s; }
+
+// ── Coordinate helpers ──────────────────────────────────────────────────────
+const g2c = (r, c) => ({ x: PAD + c * CELL, y: PAD + r * CELL });
+const c2g = (px, py) => ({ r: Math.round((py - PAD) / CELL), c: Math.round((px - PAD) / CELL) });
+const inB = (r, c) => r >= 0 && r < BS && c >= 0 && c < BS;
+
+// ── Rendering ───────────────────────────────────────────────────────────────
+function draw() {
+  cx.drawImage(imgs.brd, 0, 0, SZ, SZ);
+
+  // Stones
+  for (let r = 0; r < BS; r++)
+    for (let c = 0; c < BS; c++)
+      if (bd[r][c]) drawStone(r, c, bd[r][c], 1);
+
+  // Hover ghost
+  if (!over && !thinking && inB(hr, hc) && !bd[hr][hc])
+    drawStone(hr, hc, turn, 0.35);
+
+  // Win highlight
+  if (winLine.length) {
+    cx.save();
+    cx.strokeStyle = 'rgba(255, 55, 55, 0.92)';
+    cx.lineWidth = 3;
+    cx.shadowColor = '#ff2020';
+    cx.shadowBlur = 14;
+    winLine.forEach(([r, c]) => {
+      const { x, y } = g2c(r, c);
+      cx.beginPath();
+      cx.arc(x, y, CELL * 0.44, 0, Math.PI * 2);
+      cx.stroke();
+    });
+    cx.restore();
+  }
+}
+
+function drawStone(r, c, p, alpha) {
+  const { x, y } = g2c(r, c);
+  const sz = CELL * 0.88;
+  cx.globalAlpha = alpha;
+  cx.drawImage(p === B ? imgs.blk : imgs.wht, x - sz / 2, y - sz / 2, sz, sz);
+  cx.globalAlpha = 1;
+}
+
+// ── Input ───────────────────────────────────────────────────────────────────
+cv.addEventListener('mousemove', e => {
+  if (over || thinking) return;
+  const rect = cv.getBoundingClientRect();
+  const sx = cv.width / rect.width, sy = cv.height / rect.height;
+  const { r, c } = c2g((e.clientX - rect.left) * sx, (e.clientY - rect.top) * sy);
+  if (r !== hr || c !== hc) { hr = r; hc = c; draw(); }
+});
+
+cv.addEventListener('mouseleave', () => { hr = -1; hc = -1; draw(); });
+
+cv.addEventListener('click', e => {
+  if (over || thinking) return;
+  if (mode === 'pvai' && turn === aiC) return;
+  const rect = cv.getBoundingClientRect();
+  const sx = cv.width / rect.width, sy = cv.height / rect.height;
+  const { r, c } = c2g((e.clientX - rect.left) * sx, (e.clientY - rect.top) * sy);
+  if (!inB(r, c) || bd[r][c]) return;
+  place(r, c, turn);
+  if (!over && mode === 'pvai') scheduleAI();
+});
+
+// ── Game logic ───────────────────────────────────────────────────────────────
+function place(r, c, p) {
+  bd[r][c] = p;
+  const line = checkWin(r, c, p);
+  if (line) {
+    over = true; winLine = line;
+    setStatus(p === B ? '⚫ 黑棋獲勝！' : '⚪ 白棋獲勝！');
+  } else if (bd.every(row => row.every(v => v))) {
+    over = true;
+    setStatus('棋盤已滿，平局！');
+  } else {
+    turn = p === B ? W : B;
+    setStatus(turn === B ? '⚫ 黑棋落子' : '⚪ 白棋落子');
+  }
+  draw();
+}
+
+function checkWin(r, c, p) {
+  for (const [dr, dc] of DIRS) {
+    const L = buildLine(r, c, dr, dc, p);
+    if (L.length >= 5) return L;
+  }
+  return null;
+}
+
+function buildLine(r, c, dr, dc, p) {
+  const L = [[r, c]];
+  for (let d = 1; d < 5; d++) {
+    const nr = r + dr * d, nc = c + dc * d;
+    if (!inB(nr, nc) || bd[nr][nc] !== p) break;
+    L.push([nr, nc]);
+  }
+  for (let d = 1; d < 5; d++) {
+    const nr = r - dr * d, nc = c - dc * d;
+    if (!inB(nr, nc) || bd[nr][nc] !== p) break;
+    L.unshift([nr, nc]);
+  }
+  return L;
+}
+
+// ── AI ───────────────────────────────────────────────────────────────────────
+function scheduleAI() {
+  thinking = true;
+  setStatus((aiC === B ? '⚫ 黑棋' : '⚪ 白棋') + '落子（AI 思考中…）');
+  draw();
+  setTimeout(() => {
+    const [r, c] = bestMove();
+    thinking = false;
+    place(r, c, aiC);
+  }, 60);
+}
+
+function bestMove() {
+  const cands = candidates();
+  if (!cands.length) return [7, 7];
+
+  // Immediate win
+  for (const [r, c] of cands) {
+    bd[r][c] = aiC;
+    const w = checkWin(r, c, aiC);
+    bd[r][c] = E;
+    if (w) return [r, c];
+  }
+  // Immediate block
+  for (const [r, c] of cands) {
+    bd[r][c] = huC;
+    const w = checkWin(r, c, huC);
+    bd[r][c] = E;
+    if (w) return [r, c];
+  }
+
+  // Minimax on top candidates
+  const top = ranked(cands, aiC).slice(0, 15);
+  let best = top[0], bv = -Infinity;
+  for (const [r, c] of top) {
+    bd[r][c] = aiC;
+    const v = mm(3, -Infinity, Infinity, false, r, c);
+    bd[r][c] = E;
+    if (v > bv) { bv = v; best = [r, c]; }
+  }
+  return best;
+}
+
+function mm(depth, alpha, beta, isMax, lr, lc) {
+  // isMax=true → AI's turn to maximize; lastP = human (who just moved)
+  const lastP = isMax ? huC : aiC;
+  if (checkWin(lr, lc, lastP)) return isMax ? -(1e6 + depth) : 1e6 + depth;
+  if (depth === 0) return evalBoard();
+
+  const cands = candidates();
+  if (!cands.length) return 0;
+  const top = ranked(cands, isMax ? aiC : huC).slice(0, 10);
+
+  if (isMax) {
+    let v = -Infinity;
+    for (const [r, c] of top) {
+      bd[r][c] = aiC;
+      v = Math.max(v, mm(depth - 1, alpha, beta, false, r, c));
+      bd[r][c] = E;
+      alpha = Math.max(alpha, v);
+      if (beta <= alpha) break;
+    }
+    return v;
+  } else {
+    let v = Infinity;
+    for (const [r, c] of top) {
+      bd[r][c] = huC;
+      v = Math.min(v, mm(depth - 1, alpha, beta, true, r, c));
+      bd[r][c] = E;
+      beta = Math.min(beta, v);
+      if (beta <= alpha) break;
+    }
+    return v;
+  }
+}
+
+// ── Evaluation ───────────────────────────────────────────────────────────────
+const SC = { 5: 1e6, o4: 12000, d4: 2500, o3: 2500, d3: 250, o2: 80, d2: 15 };
+
+function evalBoard() { return scoreP(aiC) - scoreP(huC) * 1.05; }
+
+function scoreP(p) {
+  let t = 0;
+  for (let r = 0; r < BS; r++)
+    for (let c = 0; c < BS; c++)
+      if (bd[r][c] === p)
+        for (const [dr, dc] of DIRS)
+          t += seg(r, c, dr, dc, p);
+  return t;
+}
+
+function seg(r, c, dr, dc, p) {
+  let cnt = 1, open = 0;
+  for (let d = 1; d < 5; d++) {
+    const nr = r + dr * d, nc = c + dc * d;
+    if (!inB(nr, nc)) break;
+    if (bd[nr][nc] === p) cnt++;
+    else { if (bd[nr][nc] === E) open++; break; }
+  }
+  for (let d = 1; d < 5; d++) {
+    const nr = r - dr * d, nc = c - dc * d;
+    if (!inB(nr, nc)) break;
+    if (bd[nr][nc] === p) cnt++;
+    else { if (bd[nr][nc] === E) open++; break; }
+  }
+  if (cnt >= 5) return SC[5];
+  if (cnt === 4) return open === 2 ? SC.o4 : open === 1 ? SC.d4 : 0;
+  if (cnt === 3) return open === 2 ? SC.o3 : open === 1 ? SC.d3 : 0;
+  if (cnt === 2) return open === 2 ? SC.o2 : open === 1 ? SC.d2 : 0;
+  return 0;
+}
+
+function ranked(cands, p) {
+  return cands.map(([r, c]) => {
+    bd[r][c] = p;
+    const s = scoreP(p);
+    bd[r][c] = E;
+    return { r, c, s };
+  }).sort((a, b) => b.s - a.s).map(({ r, c }) => [r, c]);
+}
+
+// ── Candidate generation ─────────────────────────────────────────────────────
+function candidates() {
+  const set = new Set();
+  let any = false;
+  for (let r = 0; r < BS; r++) {
+    for (let c = 0; c < BS; c++) {
+      if (bd[r][c]) {
+        any = true;
+        for (let dr = -2; dr <= 2; dr++)
+          for (let dc = -2; dc <= 2; dc++) {
+            const nr = r + dr, nc = c + dc;
+            if (inB(nr, nc) && !bd[nr][nc]) set.add(nr * BS + nc);
+          }
+      }
+    }
+  }
+  if (!any) return [[7, 7]];
+  return [...set].map(v => [Math.floor(v / BS), v % BS]);
+}
+</script>
+</body>
+</html>
